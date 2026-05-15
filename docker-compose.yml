@@ -23,7 +23,7 @@ services:
     container_name: zalo-tg
     restart: unless-stopped
     env_file:
-      - .env
+      - stack.env
     environment:
       - NODE_ENV=production
       - DATA_DIR=/app/data
