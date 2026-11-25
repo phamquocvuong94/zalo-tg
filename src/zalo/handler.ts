@@ -808,6 +808,17 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
             content: _echoContent,
             ts: msg.data.ts,
             ttl: msg.data.ttl ?? 0,
+            // Self echo → the sender is our own account. Also repairs entries
+            // saved with uidFrom="[object Promise]" by older builds. Only touch
+            // entries of this same conversation (msgIds are not unique across
+            // groups) or ones that hold the known-broken value.
+            ...(() => {
+              const ownUidForEcho = String(api.getOwnId?.() ?? '');
+              if (!ownUidForEcho || ownUidForEcho === '[object Promise]') return {};
+              const stored = msgStore.getQuote(_tgId);
+              const sameThread = stored?.zaloId === undefined || stored.zaloId === msg.threadId;
+              return sameThread || stored?.uidFrom === '[object Promise]' ? { uidFrom: ownUidForEcho } : {};
+            })(),
           });
         }
 

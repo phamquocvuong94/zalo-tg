@@ -77,6 +77,12 @@ function isTransient(err: unknown): boolean {
 /** Exported so callers can check if a caught error is a transient network error. */
 export { isTransient as isTransientNetworkError };
 
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return value !== null
+    && (typeof value === 'object' || typeof value === 'function')
+    && typeof (value as { then?: unknown }).then === 'function';
+}
+
 /**
  * Run `fn` and retry up to MAX_RETRIES times if a transient network error
  * is thrown. Non-transient errors (Zalo API codes, auth failures, etc.)
@@ -85,10 +91,14 @@ export { isTransient as isTransientNetworkError };
 export async function withZaloRetry<T>(
   fn:    () => Promise<T>,
   label: string,
+  firstAttempt?: Promise<T>,
 ): Promise<T> {
   let attempt = 0;
   while (true) {
     try {
+      // `firstAttempt` lets a caller that already started the call (to see
+      // whether it is async at all) hand that in instead of calling twice.
+      if (attempt === 0 && firstAttempt) return await firstAttempt;
       return await fn();
     } catch (err) {
       if (!isTransient(err) || attempt >= MAX_RETRIES) throw err;
@@ -113,6 +123,10 @@ export async function withZaloRetry<T>(
  *
  * All api.sendMessage / api.uploadAttachment / api.sendVoice / … calls
  * are then automatically retried on transient network errors.
+ *
+ * Synchronous methods (e.g. getOwnId, getContext) keep returning their value
+ * directly: wrapping them in a Promise made `String(api.getOwnId())` yield
+ * "[object Promise]", which then got stored as the quote sender uid.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function zaloApiWithRetry(api: any): any {
@@ -120,11 +134,19 @@ export function zaloApiWithRetry(api: any): any {
     get(target, prop: string) {
       const orig = target[prop];
       if (typeof orig !== 'function') return orig;
-      return (...args: unknown[]) =>
-        withZaloRetry(
-          () => (orig as (...a: unknown[]) => Promise<unknown>).apply(target, args),
-          String(prop),
-        );
+      return (...args: unknown[]) => {
+        const call = () => (orig as (...a: unknown[]) => unknown).apply(target, args);
+        let first: unknown;
+        try {
+          first = call();
+        } catch (err) {
+          // Keep the old contract for sync throws: surface them as a rejected
+          // promise (retried when transient), like an async method would.
+          return withZaloRetry(call as () => Promise<unknown>, String(prop), Promise.reject(err));
+        }
+        if (!isThenable(first)) return first;
+        return withZaloRetry(call as () => Promise<unknown>, String(prop), first as Promise<unknown>);
+      };
     },
   });
 }

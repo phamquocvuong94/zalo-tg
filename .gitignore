@@ -29,3 +29,6 @@ npm-debug.log*
 .idea/
 logs/
 app-session.json
+
+# Backups of data/credentials — never commit
+*.tar.gz

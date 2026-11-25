@@ -399,7 +399,7 @@ export const msgStore = {
    */
   updateQuoteFromEcho(
     tgMsgId: number,
-    patch: Partial<Pick<ZaloQuoteData, 'msgId' | 'cliMsgId' | 'msgType' | 'content' | 'ts' | 'ttl'>>,
+    patch: Partial<Pick<ZaloQuoteData, 'msgId' | 'cliMsgId' | 'msgType' | 'content' | 'ts' | 'ttl' | 'uidFrom'>>,
   ): void {
     const quote = _tgToQuote.get(tgMsgId);
     if (!quote) return;

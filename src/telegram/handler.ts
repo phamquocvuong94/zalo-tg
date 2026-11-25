@@ -2424,7 +2424,11 @@ export function setupTelegramHandler(
         content: fromMsgStore.content,
         msgType: fromMsgStore.msgType,
         propertyExt: undefined,
-        uidFrom: fromMsgStore.uidFrom,
+        // Older builds stored "[object Promise]" for messages sent from
+        // Telegram; those are always our own messages, so use our uid.
+        uidFrom: fromMsgStore.uidFrom === '[object Promise]'
+          ? String(currentApi?.getOwnId?.() ?? '')
+          : fromMsgStore.uidFrom,
         msgId: fromMsgStore.msgId,
         cliMsgId: fromMsgStore.cliMsgId,
         ts: fromMsgStore.ts,
