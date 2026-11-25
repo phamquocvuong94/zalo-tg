@@ -1,35 +1,36 @@
-# Local Telegram Bot API Server
+# zalo-tg + Local Telegram Bot API Server (file lớn đến 2 GB)
 # Tài liệu: https://core.telegram.org/bots/api#using-a-local-bot-api-server
 #
 # Lợi ích:
 #   - Upload file lên đến 2 GB (thay vì 50 MB)
 #   - Download file lên đến 2 GB (thay vì 20 MB)
-#   - Bot có thể nhận webhook qua HTTP
 #
-# Yêu cầu:
-#   - TG_API_ID và TG_API_HASH: lấy tại https://my.telegram.org/apps
-#   - (Chỉ cần cho local server — bot code không cần)
+# Biến môi trường (Komodo: khai báo trong mục Environment của Stack — Komodo
+# ghi chúng ra file .env cạnh compose; docker compose thường: tạo file .env):
+#   TG_TOKEN, TG_GROUP_ID          — bắt buộc
+#   TG_API_ID, TG_API_HASH         — bắt buộc cho local server, lấy tại
+#                                    https://my.telegram.org/apps
+#   LOCAL_BOT_API / TG_LOCAL_SERVER — đã đặt sẵn bên dưới, không cần khai báo
 #
 # Khởi động lần đầu:
-#   1. docker compose up -d
-#   2. Chạy script migrate nếu bot đang dùng official API:
+#   1. Đăng xuất bot khỏi API chính thức (chỉ một lần):
 #      curl "https://api.telegram.org/bot<TOKEN>/logOut"
-#   3. Sau đó khởi động bot với TG_LOCAL_SERVER=http://localhost:8081
+#   2. Deploy stack (Komodo: Deploy / docker compose up -d --build)
 
 services:
   telegram-bot-api:
     image: aiogram/telegram-bot-api:latest
     environment:
-      TELEGRAM_API_ID:   "${TG_API_ID}"
-      TELEGRAM_API_HASH: "${TG_API_HASH}"
+      TELEGRAM_API_ID:   "${TG_API_ID:?TG_API_ID is required for the local Bot API server}"
+      TELEGRAM_API_HASH: "${TG_API_HASH:?TG_API_HASH is required for the local Bot API server}"
       # aiogram/telegram-bot-api's entrypoint intentionally ignores Docker
       # `command` arguments and builds its CLI exclusively from these vars.
       # Without TELEGRAM_LOCAL it silently starts in normal mode and rejects
       # every file:// upload from the bridge with HTTP 400.
       TELEGRAM_LOCAL:     "1"
       # getFile returns an absolute path under WORK_DIR in local mode. Keep it
-      # under the host-shared /tmp tree so a bridge running either on macOS or
-      # in Compose can read incoming Telegram files directly.
+      # under the shared /tmp tree so the bridge can read incoming Telegram
+      # files directly at the same absolute path.
       TELEGRAM_WORK_DIR:  /tmp/telegram-bot-api
       TELEGRAM_TEMP_DIR:  /tmp
     volumes:
@@ -37,8 +38,11 @@ services:
       # Explicit nested bind makes Docker create the work directory before the
       # image entrypoint tries to chown it on a fresh machine.
       - /tmp/telegram-bot-api:/tmp/telegram-bot-api
+    # zalo-tg reaches the server over the Compose network
+    # (http://telegram-bot-api:8081). Publish only on the host's loopback for
+    # debugging — never on a public interface.
     ports:
-      - "${TG_LOCAL_PORT:-8081}:8081"
+      - "127.0.0.1:${TG_LOCAL_PORT:-8081}:8081"
     restart: unless-stopped
     healthcheck:
       # Bot API intentionally returns 404 at `/`; probe the listening socket
@@ -53,6 +57,8 @@ services:
     image: zalo-tg:latest
     container_name: zalo-tg
     restart: unless-stopped
+    # Files written by telegram-bot-api belong to its group (gid 101); join it
+    # so the bridge can read downloaded Telegram files.
     group_add:
       - "101"
     env_file:
@@ -62,6 +68,9 @@ services:
       - ZALO_TG_RUNNER=1
       - DATA_DIR=/app/data
       - ZALO_CREDENTIALS_PATH=/app/data/credentials.json
+      # This stack always runs the local server, so enable it here instead of
+      # relying on LOCAL_BOT_API=1 being present in .env.
+      - LOCAL_BOT_API=1
       # Inside Compose, localhost points back to this container. Route Bot API
       # traffic through the service DNS name instead.
       - TG_LOCAL_SERVER=http://telegram-bot-api:8081
@@ -69,12 +78,18 @@ services:
       telegram-bot-api:
         condition: service_healthy
     volumes:
-      # Persistent data — lưu topics.json + credentials.json
-      - ./data:/app/data
-      # Share generated QR paths with telegram-bot-api --local.
+      # Persistent data — topics, message maps, credentials.json. A named
+      # volume inherits /app/data's ownership from the image (user nodejs,
+      # uid 10001); a ./data bind mount would be created root-owned and the
+      # bridge could not write to it.
+      - zalo-tg-data:/app/data
+      # Share file:// paths (uploads, QR images) with telegram-bot-api --local.
       - /tmp:/tmp
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  zalo-tg-data:

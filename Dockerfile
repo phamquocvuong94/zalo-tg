@@ -45,7 +45,11 @@ ENV NODE_ENV=production
 # account database is ever corrupted by a stale Docker layer.
 RUN addgroup -S -g 10001 nodejs \
     && adduser -S -D -H -u 10001 -G nodejs nodejs \
-    && id nodejs
+    && id nodejs \
+    && mkdir -p /app/data \
+    && chown nodejs:nodejs /app/data
+# /app/data exists and is owned by nodejs so a named volume mounted there
+# starts out writable by the runtime user.
 
 # Copy build artifacts and production dependencies
 # --chown is used here to avoid creating an extra layer with 'RUN chown'
