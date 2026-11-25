@@ -19,6 +19,7 @@ import { config } from '../config.js';
 
 const GROUP_DOMAIN   = 'https://group-wpa.zaloapp.com';
 const PROFILE_DOMAIN = 'https://profile-wpa.zaloapp.com';
+const FRIEND_DOMAIN  = 'https://friend-wpa.zaloapp.com';
 const API_TYPE       = 30;
 const API_VERSION    = 671;
 const PC_UA          = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) ZaloPC/23.12.1 Chrome/102.0.5005.167 Electron/19.1.9 Safari/537.36';
@@ -27,16 +28,24 @@ const PC_UA          = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTM
 
 interface AppSession {
   zpw_enk: string;
+  dkey?:   string;
   imei:    string;
   cookies: Array<{ name: string; value: string; domain: string }>;
 }
 
 let _session: AppSession | null | undefined;  // undefined = not yet loaded
 
-function loadAppSession(): AppSession | null {
+export function loadAppSession(): AppSession | null {
   if (_session !== undefined) return _session;
+  return _reloadAppSession();
+}
+
+function _reloadAppSession(): AppSession | null {
   const p = path.join(path.dirname(config.zalo.credentialsPath), 'app-session.json');
-  if (!existsSync(p)) { _session = null; return null; }
+  if (!existsSync(p)) {
+    _session = null;
+    return null;
+  }
   try {
     _session = JSON.parse(readFileSync(p, 'utf8')) as AppSession;
     return _session;
@@ -49,6 +58,15 @@ function loadAppSession(): AppSession | null {
 /** Call this after a new /loginapp to reload the session from disk. */
 export function invalidateAppSession(): void {
   _session = undefined;
+}
+
+/**
+ * Force a fresh read from disk, ignoring the cache.
+ * Useful when the file may have been written between calls.
+ */
+export function reloadAppSession(): AppSession | null {
+  _session = undefined;
+  return _reloadAppSession();
 }
 
 // ── Crypto (same as loginApp.ts) ──────────────────────────────────────────────
@@ -93,6 +111,8 @@ function buildCookieHeader(cookies: Array<{ name: string; value: string; domain:
 // ── Group info (PC App, bypasses web-API rate limit) ─────────────────────────
 
 export interface AppGroupData {
+  name?: string;
+  avt?: string;
   memVerList?:  string[];
   currentMems?: Array<{ id: string; dName?: string; zaloName?: string }>;
   totalMember?: number;
@@ -126,6 +146,7 @@ export async function appGetGroupInfo(groupId: string): Promise<AppGroupData | n
           'Cookie':       buildCookieHeader(sess.cookies, url),
         },
         timeout: 15_000,
+        family:  4, // avoid IPv6 Happy-Eyeballs stalls in Docker (see media.ts)
       },
     );
 
@@ -181,6 +202,7 @@ export async function appGetGroupMembersInfo(uids: string[]): Promise<Map<string
             'Cookie':       buildCookieHeader(sess.cookies, url),
           },
           timeout: 15_000,
+          family:  4, // avoid IPv6 Happy-Eyeballs stalls in Docker (see media.ts)
         },
       );
 
@@ -216,4 +238,77 @@ export async function appGetGroupMembersInfo(uids: string[]): Promise<Map<string
   }
 
   return result;
+}
+
+// ── Friend Requests (PC App) ──────────────────────────────────────────────────
+
+/**
+ * Fetch the FULL list of received friend requests (recommendations) via PC App API.
+ * The Web API truncates the list, but this bypasses it.
+ */
+export async function appGetReceivedFriendRequests(count = 200, offset = 0): Promise<any[]> {
+  const sess = loadAppSession();
+  if (!sess) return [];
+
+  const url = `${FRIEND_DOMAIN}/api/friend/recommendsv2/list`;
+  const body = { count, offset };
+  const encBody = encodeAes(JSON.stringify(body), sess.zpw_enk);
+
+  try {
+    const resp = await axios.get<{ error_code: number; data?: string; error_message?: string }>(url, {
+      params: { ...commonParams(sess.imei), params: encBody },
+      headers: {
+        'User-Agent': PC_UA,
+        'Cookie': buildCookieHeader(sess.cookies, url),
+      },
+      timeout: 15_000,
+      family:  4, // avoid IPv6 Happy-Eyeballs stalls in Docker (see media.ts)
+    });
+
+    if (resp.data.error_code !== 0 || !resp.data.data) {
+      console.warn(`[AppApi] getReceivedFriendRequests error [${resp.data.error_code}]`);
+      return [];
+    }
+
+    const parsed = JSON.parse(decodeAes(resp.data.data, sess.zpw_enk));
+    return parsed?.data?.recommItems || [];
+  } catch (err) {
+    console.warn(`[AppApi] getReceivedFriendRequests failed:`, err instanceof Error ? err.message : err);
+    return [];
+  }
+}
+
+/**
+ * Fetch the FULL list of sent friend requests via PC App API.
+ */
+export async function appGetSentFriendRequests(count = 200, offset = 0): Promise<Record<string, any>> {
+  const sess = loadAppSession();
+  if (!sess) return {};
+
+  const url = `${FRIEND_DOMAIN}/api/friend/requested/list`;
+  const body = { count, offset };
+  const encBody = encodeAes(JSON.stringify(body), sess.zpw_enk);
+
+  try {
+    const resp = await axios.get<{ error_code: number; data?: string; error_message?: string }>(url, {
+      params: { ...commonParams(sess.imei), params: encBody },
+      headers: {
+        'User-Agent': PC_UA,
+        'Cookie': buildCookieHeader(sess.cookies, url),
+      },
+      timeout: 15_000,
+      family:  4, // avoid IPv6 Happy-Eyeballs stalls in Docker (see media.ts)
+    });
+
+    if (resp.data.error_code !== 0 || !resp.data.data) {
+      console.warn(`[AppApi] getSentFriendRequests error [${resp.data.error_code}]`);
+      return {};
+    }
+
+    const parsed = JSON.parse(decodeAes(resp.data.data, sess.zpw_enk));
+    return parsed?.data || {};
+  } catch (err) {
+    console.warn(`[AppApi] getSentFriendRequests failed:`, err instanceof Error ? err.message : err);
+    return {};
+  }
 }
