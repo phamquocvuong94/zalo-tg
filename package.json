@@ -16,7 +16,6 @@
   },
   "dependencies": {
     "@napi-rs/canvas": "^1.0.1",
-    "adm-zip": "^0.5.17",
     "axios": "^1.7.2",
     "dotenv": "^16.4.5",
     "image-size": "^2.0.2",
@@ -27,7 +26,6 @@
     "zca-js": "2.1.2"
   },
   "devDependencies": {
-    "@types/adm-zip": "^0.5.8",
     "@types/image-size": "^0.7.0",
     "@types/node": "^20.14.0",
     "@types/qrcode": "^1.5.6",

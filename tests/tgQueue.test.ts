@@ -88,3 +88,53 @@ test('tgQueue does not transient-retry permanent Telegram errors', async () => {
   );
   assert.equal(attempts, 1);
 });
+
+test('tgQueueCall reopens consumed file streams when a call is retried', async () => {
+  const { tgQueueCall } = await import('../src/utils/tgQueue.js');
+  const { mkdtempSync, writeFileSync, createReadStream } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const path = await import('node:path');
+
+  const dir = mkdtempSync(path.join(tmpdir(), 'tgq-'));
+  const file = path.join(dir, 'a.bin');
+  writeFileSync(file, 'hello');
+
+  const read = (s: NodeJS.ReadableStream) => new Promise<string>((resolve, reject) => {
+    let data = '';
+    s.on('data', c => { data += c; });
+    s.on('end', () => resolve(data));
+    s.on('error', reject);
+  });
+
+  const seen: string[] = [];
+  let calls = 0;
+  const result = await tgQueueCall(async (...args: unknown[]) => {
+    const input = args[1] as { source: NodeJS.ReadableStream };
+    seen.push(await read(input.source));
+    if (++calls === 1) throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+    return 'ok';
+  }, [123, { source: createReadStream(file) }]);
+
+  assert.equal(result, 'ok');
+  assert.deepEqual(seen, ['hello', 'hello']);
+});
+
+test('refreshFileStreams keeps the byte range of the original stream', async () => {
+  const { refreshFileStreams } = await import('../src/utils/tgQueue.js');
+  const { mkdtempSync, writeFileSync, createReadStream } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const path = await import('node:path');
+
+  const dir = mkdtempSync(path.join(tmpdir(), 'tgq-'));
+  const file = path.join(dir, 'b.bin');
+  writeFileSync(file, '0123456789');
+
+  const [fresh] = refreshFileStreams([createReadStream(file, { start: 2, end: 4 })]);
+  const data = await new Promise<string>((resolve, reject) => {
+    let out = '';
+    fresh.on('data', c => { out += c; });
+    fresh.on('end', () => resolve(out));
+    fresh.on('error', reject);
+  });
+  assert.equal(data, '234');
+});

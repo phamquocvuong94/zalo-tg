@@ -1,3 +1,6 @@
+// Must stay the first import: redacts bot tokens from every log line,
+// including logs emitted while the modules below are loading.
+import './utils/installRedaction.js';
 import { getZaloApi, resetZaloApi } from './zalo/client.js';
 import { CloseReason, ThreadType } from 'zca-js';
 import { setupZaloHandler } from './zalo/handler.js';
@@ -8,6 +11,7 @@ import { startUpdateChecker } from './updater.js';
 import { store, userCache } from './store.js';
 import { registerShutdownHandler, requestShutdown } from './lifecycle.js';
 import { terminal } from './utils/terminal.js';
+import { installLogRedaction } from './utils/redact.js';
 
 // ── Global safety net — prevent unhandled rejections from crashing ────────────
 process.on('unhandledRejection', (reason) => {
@@ -136,6 +140,15 @@ async function startZalo(
 async function main(): Promise<void> {
   await terminal.intro('1.0.0');
   terminal.installConsoleTheme();
+  installLogRedaction();
+
+  // Older versions could persist a Zalo chat ↔ General (topic 1) mapping when
+  // topic creation failed. General is shared, so drop it to avoid misrouting.
+  const generalEntry = store.getEntryByTopic(1);
+  if (generalEntry) {
+    store.remove(1);
+    console.warn(`[Boot] Removed stale General-topic mapping for ${generalEntry.name} (${generalEntry.zaloId})`);
+  }
   terminal.section('STARTUP');
   terminal.status('runtime', `${process.version} · pid ${process.pid}`, 'muted');
   terminal.status('cache', `${userCache.stats().users} users · ${store.all().length} topics restored`, 'muted');

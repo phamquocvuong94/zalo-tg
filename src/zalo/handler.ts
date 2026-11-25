@@ -17,7 +17,7 @@ import { downloadToTemp, downloadToTempFromCandidates, cleanTemp, convertSpriteS
 import { applyZaloMarkupHtml, formatGroupMsgHtml, formatGroupMsg, groupCaption, topicName, truncate, escapeHtml } from '../utils/format.js';
 import type { ZaloStyle } from '../utils/format.js';
 import { msgStore, userCache, pollStore, sentMsgStore, zaloAlbumStore, reactionEchoStore, reactionSummaryStore, reactionEventDedupeStore, aliasCache, friendsCache, recentlyRecalledMsgIds, recallNotifiedStore, type ZaloQuoteData } from '../store.js';
-import { tgQueue } from '../utils/tgQueue.js';
+import { tgQueueCall } from '../utils/tgQueue.js';
 import { maybeAutoReply } from './autoReply.js';
 
 // Proxy that routes every tg.* call through the rate-limit queue
@@ -27,7 +27,7 @@ const tg = new Proxy(tgBot.telegram, {
     const orig = (target as unknown as Record<string, unknown>)[prop];
     if (typeof orig !== 'function') return orig;
     return (...args: unknown[]) =>
-      tgQueue(() => (orig as (...a: unknown[]) => Promise<unknown>).apply(target, args));
+      tgQueueCall((...a: unknown[]) => (orig as (...x: unknown[]) => Promise<unknown>).apply(target, a), args);
   },
 }) as typeof tgBot.telegram;
 
@@ -423,6 +423,10 @@ async function sendWithTopicRecovery<T>(
   }
 }
 
+/** In-memory only: chats whose topic creation failed for lack of rights → time of failure. */
+const _generalFallbackSince = new Map<string, number>();
+const GENERAL_FALLBACK_RETRY_MS = 10 * 60_000;
+
 async function _doCreateTopic(
   zaloId: string,
   type: 0 | 1,
@@ -432,6 +436,12 @@ async function _doCreateTopic(
   // Re-check after acquiring "lock" — another concurrent call may have finished
   const existing = store.getTopicByZalo(zaloId, type);
   if (existing !== undefined) return existing;
+
+  // Topic creation recently failed for lack of rights: go straight to General
+  // instead of calling createForumTopic (and logging) on every message.
+  const fallbackKey = `${type}:${zaloId}`;
+  const failedAt = _generalFallbackSince.get(fallbackKey);
+  if (failedAt !== undefined && Date.now() - failedAt < GENERAL_FALLBACK_RETRY_MS) return 1;
 
   const name  = topicName(displayName, type);
   const color = type === ThreadType.Group ? 0xFF93B2 : 0x6FB9F0;
@@ -447,10 +457,14 @@ async function _doCreateTopic(
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes('not enough rights') || msg.includes('TOPIC_') || msg.includes('rights to manage')) {
       console.error(`[Zalo→TG] Cannot create topic — bot lacks "Manage Topics" admin right. Falling back to General topic.`);
-      // Use topic ID 1 (General) as fallback so messages still get delivered
-      const fallbackId = 1;
-      store.set({ topicId: fallbackId, zaloId, type, name: displayName });
-      return fallbackId;
+      // Deliver into General (topic 1) so messages are not lost, but never
+      // persist the mapping: General is shared by every chat, so mapping it to
+      // one Zalo conversation would route replies typed there to the wrong
+      // person (and each new chat would steal the mapping from the previous).
+      // Also drop any such mapping saved by older versions.
+      if (store.getEntryByTopic(1)) store.remove(1);
+      _generalFallbackSince.set(fallbackKey, Date.now());
+      return 1;
     }
     throw err;
   }

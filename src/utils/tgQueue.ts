@@ -8,7 +8,51 @@
  * retried inline with exponential backoff before giving up.
  */
 
+import { createReadStream, ReadStream } from 'fs';
 import { isTransientNetworkError } from './zaloRetry.js';
+
+/**
+ * Return a copy of `value` where every fs.ReadStream (e.g. `{ source: stream }`
+ * input files) is replaced by a fresh stream on the same path. A stream is
+ * consumed by the first upload attempt, so retrying with it would send an
+ * empty/truncated file. The old stream is destroyed to release its fd.
+ */
+export function refreshFileStreams<T>(value: T): T {
+  if (value instanceof ReadStream) {
+    const filePath = value.path;
+    if (typeof filePath !== 'string' && !Buffer.isBuffer(filePath)) return value;
+    // Keep the byte range and buffering options of the original stream.
+    const { start, end } = value as unknown as { start?: number; end?: number };
+    const options = {
+      ...(start !== undefined ? { start } : {}),
+      ...(end !== undefined && Number.isFinite(end) ? { end } : {}),
+      highWaterMark: value.readableHighWaterMark,
+      ...(value.readableEncoding ? { encoding: value.readableEncoding } : {}),
+    };
+    value.destroy();
+    return createReadStream(filePath, options) as unknown as T;
+  }
+  if (Array.isArray(value)) return value.map(v => refreshFileStreams(v)) as unknown as T;
+  if (value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = refreshFileStreams(v);
+    return out as T;
+  }
+  return value;
+}
+
+/**
+ * Queue `fn(...args)`; on every retry after the first attempt, the arguments
+ * are rebuilt with fresh file streams (see refreshFileStreams).
+ */
+export function tgQueueCall<T>(fn: (...args: unknown[]) => Promise<T>, args: unknown[]): Promise<T> {
+  let current = args;
+  let attempts = 0;
+  return tgQueue(() => {
+    if (attempts++ > 0) current = refreshFileStreams(current);
+    return fn(...current);
+  });
+}
 
 interface QueueItem {
   fn: () => Promise<unknown>;

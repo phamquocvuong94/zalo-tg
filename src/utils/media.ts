@@ -7,6 +7,7 @@ import { gunzipSync } from 'zlib';
 import path from 'path';
 import { imageSizeFromFile } from 'image-size/fromFile';
 import { createSharedTempPath, getSharedTempDir } from './sharedTemp.js';
+import { redactSecrets } from './redact.js';
 
 // Local Bot API reads outgoing files from a shared host/container path.
 // Use a permission-safe resolver instead of the historical fixed /tmp/zalo-tg
@@ -59,14 +60,14 @@ export async function downloadToTemp(url: string, fileName?: string, retries = 3
         : '';
       if (code === 'ENOENT') {
         throw new Error(
-          `Local Bot API file is not visible to the bridge: ${srcPath}. `
+          `Local Bot API file is not visible to the bridge: ${redactSecrets(srcPath)}. `
           + 'Mount TELEGRAM_WORK_DIR at the same absolute path in both processes.',
           { cause: err },
         );
       }
       if (code === 'EACCES') {
         throw new Error(
-          `Local Bot API file cannot be read due to permissions: ${srcPath}. `
+          `Local Bot API file cannot be read due to permissions: ${redactSecrets(srcPath)}. `
           + 'Ensure the bridge container has read permissions (e.g. group_add: ["101"]).',
           { cause: err },
         );
@@ -118,7 +119,7 @@ export async function downloadToTemp(url: string, fileName?: string, retries = 3
       const { size } = await stat(filePath);
       if (size === 0) {
         await unlink(filePath).catch(() => undefined);
-        lastErr = new Error(`Downloaded file is empty: ${url}`);
+        lastErr = new Error(`Downloaded file is empty: ${redactSecrets(url)}`);
         continue;
       }
 

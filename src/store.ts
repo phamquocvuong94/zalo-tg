@@ -1209,6 +1209,7 @@ export interface PollEntry {
   zaloGroupId:      string;
   tgPollMsgId:      number;    // TG message_id of the bot-owned clone poll
   tgOrigPollMsgId?: number;    // TG message_id of the user's original poll (to stopPoll on lock)
+  tgCreatorId?:     number;    // TG user id who created the poll (may lock it without admin rights)
   tgPollUUID:       string;    // TG poll identifier from ctx.pollAnswer.poll_id
   tgScoreMsgId:     number;    // TG message_id of the editable vote-count text below
   tgThreadId:       number;    // Forum thread (topic) id

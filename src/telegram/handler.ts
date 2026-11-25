@@ -51,6 +51,7 @@ import { loadAppSession, invalidateAppSession, appGetReceivedFriendRequests, app
 import { resetMemberCacheLoaded } from '../zalo/handler.js';
 import { escapeHtml } from '../utils/format.js';
 import { zaloApiWithRetry, isTransientNetworkError } from '../utils/zaloRetry.js';
+import { safeErrorMessage } from '../utils/redact.js';
 import { tgQueue } from '../utils/tgQueue.js';
 import { requestShutdown } from '../lifecycle.js';
 import { startSetupWizard, handleSetupCallback, hasActiveSetup, consumeSetupTextAndAdvance } from './setupWizard.js';
@@ -251,19 +252,57 @@ function buildTopicUrl(topicId: number): string {
   return `https://t.me/c/${internalChatId}/${topicId}`;
 }
 
-async function isTelegramGroupAdmin(userId: number): Promise<boolean> {
+/** true = admin, false = not admin, null = could not check (Telegram API error). */
+async function checkTelegramGroupAdmin(userId: number): Promise<boolean | null> {
   try {
     const member = await tgBot.telegram.getChatMember(config.telegram.groupId, userId);
     return member.status === 'creator' || member.status === 'administrator';
-  } catch {
-    return false;
+  } catch (err) {
+    console.warn(`[Auth] getChatMember failed for user ${userId}:`, err);
+    return null;
   }
 }
 
-async function requireTelegramOperator(ctx: Context, action: string): Promise<boolean> {
+async function isTelegramGroupAdmin(userId: number): Promise<boolean> {
+  return (await checkTelegramGroupAdmin(userId)) === true;
+}
+
+/**
+ * Anonymous admins post as the group itself (sender_chat = group); ctx.from is
+ * then GroupAnonymousBot, which getChatMember does not report as an admin.
+ */
+function isAnonymousGroupAdmin(ctx: Context): boolean {
+  const msg = ctx.message as { sender_chat?: { id?: number } } | undefined;
+  return msg?.sender_chat?.id === config.telegram.groupId;
+}
+
+async function checkTelegramOperator(ctx: Context): Promise<boolean | null> {
+  if (isAnonymousGroupAdmin(ctx)) return true;
   const userId = ctx.from?.id;
-  if (userId !== undefined && await isTelegramGroupAdmin(userId)) return true;
-  await ctx.reply(`⛔ Chỉ admin Telegram mới có thể ${action}.`).catch(() => undefined);
+  if (userId === undefined) return false;
+  return checkTelegramGroupAdmin(userId);
+}
+
+const operatorDeniedText = (action: string) => `⛔ Chỉ admin Telegram mới có thể ${action}.`;
+const OPERATOR_CHECK_FAILED_TEXT = '⚠️ Không kiểm tra được quyền admin (lỗi kết nối Telegram). Hãy thử lại.';
+
+const OPERATOR_CALLBACK_PREFIXES = ['lg:', 'fr:', 'af:', 'afr:', 'ufr:', 'gm:', 'jgi:', 'sc:', 'sg:'] as const;
+
+async function requireTelegramOperator(ctx: Context, action: string): Promise<boolean> {
+  const ok = await checkTelegramOperator(ctx);
+  if (ok === true) return true;
+  await ctx.reply(ok === null ? OPERATOR_CHECK_FAILED_TEXT : operatorDeniedText(action)).catch(() => undefined);
+  return false;
+}
+
+/** Same check for inline-button callbacks; answers the callback with an alert when denied. */
+async function requireTelegramOperatorCallback(ctx: Context): Promise<boolean> {
+  const ok = await checkTelegramOperator(ctx);
+  if (ok === true) return true;
+  await ctx.answerCbQuery(
+    ok === null ? OPERATOR_CHECK_FAILED_TEXT : operatorDeniedText('thực hiện thao tác này'),
+    { show_alert: true },
+  ).catch(() => undefined);
   return false;
 }
 
@@ -620,6 +659,7 @@ export function setupTelegramHandler(
     }
 
     if (arg === 'delete') {
+      if (!await requireTelegramOperator(ctx, 'xoá topic')) return;
       const removed = store.remove(topicId);
       if (!removed) {
         await ctx.telegram.sendMessage(config.telegram.groupId, '❌ Topic này chưa được map.', replyOpts);
@@ -930,6 +970,7 @@ export function setupTelegramHandler(
 
   tgBot.command('recall', async (ctx) => {
     if (ctx.chat.id !== config.telegram.groupId) return;
+    if (!await requireTelegramOperator(ctx, 'thu hồi tin nhắn')) return;
     if (!currentApi) { await ctx.reply('❌ Zalo chưa kết nối'); return; }
 
     const replyTo = 'reply_to_message' in ctx.message
@@ -987,6 +1028,9 @@ export function setupTelegramHandler(
 
   tgBot.command('search', async (ctx) => {
     if (ctx.chat.id !== config.telegram.groupId) return;
+    // Results only offer admin-only actions (sc:/sg: create topics) and expose
+    // the Zalo contact list, so searching is admin-only too.
+    if (!await requireTelegramOperator(ctx, 'tìm bạn bè / nhóm Zalo')) return;
     const threadId = 'message_thread_id' in ctx.message
       ? (ctx.message.message_thread_id as number | undefined)
       : undefined;
@@ -1163,6 +1207,7 @@ export function setupTelegramHandler(
   // /addgroup — list all groups without a topic and let user pick
   tgBot.command('addgroup', async (ctx) => {
     if (ctx.chat.id !== config.telegram.groupId) return;
+    if (!await requireTelegramOperator(ctx, 'tạo topic cho nhóm Zalo')) return;
     const threadId = 'message_thread_id' in ctx.message
       ? (ctx.message.message_thread_id as number | undefined)
       : undefined;
@@ -1226,6 +1271,7 @@ export function setupTelegramHandler(
   // ── /addfriend <số điện thoại> ─────────────────────────────────────────────
   tgBot.command('addfriend', async (ctx) => {
     if (ctx.chat.id !== config.telegram.groupId) return;
+    if (!await requireTelegramOperator(ctx, 'kết bạn Zalo')) return;
     const threadId = 'message_thread_id' in ctx.message
       ? (ctx.message.message_thread_id as number | undefined)
       : undefined;
@@ -1407,6 +1453,7 @@ export function setupTelegramHandler(
   // ── /joingroup <link> ──────────────────────────────────────────────────────
   tgBot.command('joingroup', async (ctx) => {
     if (ctx.chat.id !== config.telegram.groupId) return;
+    if (!await requireTelegramOperator(ctx, 'tham gia nhóm Zalo')) return;
     const threadId = 'message_thread_id' in ctx.message
       ? (ctx.message.message_thread_id as number | undefined)
       : undefined;
@@ -1470,6 +1517,7 @@ export function setupTelegramHandler(
   // Phải gửi trong topic của nhóm muốn rời. Hiển thị confirm button.
   tgBot.command('leavegroup', async (ctx) => {
     if (ctx.chat.id !== config.telegram.groupId) return;
+    if (!await requireTelegramOperator(ctx, 'rời nhóm Zalo')) return;
     const threadId = 'message_thread_id' in ctx.message
       ? (ctx.message.message_thread_id as number | undefined)
       : undefined;
@@ -1662,6 +1710,12 @@ export function setupTelegramHandler(
   tgBot.on('callback_query', async (ctx) => {
     const data = 'data' in ctx.callbackQuery ? ctx.callbackQuery.data : undefined;
 
+    // Actions that change the Zalo account (leave/join groups, accept friends,
+    // approve members, create topics) are admin-only.
+    if (data && OPERATOR_CALLBACK_PREFIXES.some(p => data.startsWith(p)) && data !== 'lg:cancel') {
+      if (!await requireTelegramOperatorCallback(ctx)) return;
+    }
+
     if (data?.startsWith('setup:')) {
       const callbackMessage = ctx.callbackQuery.message;
       const setupChatId = callbackMessage?.chat.id;
@@ -1747,6 +1801,9 @@ export function setupTelegramHandler(
         await ctx.answerCbQuery('❌ Không tìm thấy bình chọn.');
         return;
       }
+      // The poll's Telegram creator may lock it; anyone else must be an admin.
+      const isPollCreator = entry.tgCreatorId !== undefined && entry.tgCreatorId === ctx.from?.id;
+      if (!isPollCreator && !await requireTelegramOperatorCallback(ctx)) return;
       try {
         await doLockPoll(entry, currentApi);
         await ctx.answerCbQuery('✅ Đã khoá bình chọn');
@@ -2192,6 +2249,23 @@ export function setupTelegramHandler(
         if (reactionEventDedupeStore.isDuplicateTgOutbound({ chatId, messageId: tgMsgId, actorId, emoji: tgEmoji })) {
           return;
         }
+        // Recall changes the Zalo account, so it is admin-only like /recall.
+        // Anonymous admins react as the group itself (actor_chat = group).
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const reactorUserId = (update as any).user?.id as number | undefined;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const reactorIsAnonAdmin = (update as any).actor_chat?.id === config.telegram.groupId;
+        const reactorAdmin = reactorIsAnonAdmin
+          ? true
+          : reactorUserId !== undefined ? await checkTelegramGroupAdmin(reactorUserId) : false;
+        if (reactorAdmin !== true) {
+          if (reactorAdmin === null) {
+            console.error(`[TG→Zalo] Recall(🙈): could not verify admin rights for actor=${actorId} msg=${tgMsgId}; recall NOT performed`);
+          } else {
+            console.warn(`[TG→Zalo] Recall(🙈): ignored from non-admin actor=${actorId} msg=${tgMsgId}`);
+          }
+          return;
+        }
         // Snapshot the reconnectable Zalo singleton so a mid-recall reconnect
         // can't swap it out under us. Wrapped with zaloApiWithRetry so every
         // api.* call automatically retries on transient network errors.
@@ -2408,7 +2482,7 @@ export function setupTelegramHandler(
       // Helper: send TG error notification back to the same topic
       const notifyError = async (action: string, err: unknown) => {
         errorNotified = true;
-        const errMsg = err instanceof Error ? err.message : String(err);
+        const errMsg = safeErrorMessage(err);
         const code = (err as { code?: number })?.code;
         console.error(`[TG→Zalo] ${action} failed (zaloId=${zaloId}, type=${threadType}):`, err);
 
@@ -3203,6 +3277,7 @@ sentMsgStore.save(msg.message_id, { msgIds: [zaloMsgId], zaloId, threadType });
               zaloGroupId:      zaloId,
               tgPollMsgId:      botPollMsg.message_id,
               tgOrigPollMsgId:  msg.message_id,   // user's original poll
+              tgCreatorId:      ctx.from?.id,
               tgPollUUID:       tgPollUUID,
               tgScoreMsgId:     tgScoreMsg.message_id,
               tgThreadId:       topicId,
@@ -3306,7 +3381,7 @@ sentMsgStore.save(msg.message_id, { msgIds: [zaloMsgId], zaloId, threadType });
             ? (ctx.message.message_thread_id as number | undefined)
             : undefined;
         if (failedTopicId) {
-          const errMsg = err instanceof Error ? err.message : String(err);
+          const errMsg = safeErrorMessage(err);
           await tgBot.telegram.sendMessage(
             config.telegram.groupId,
             `⚠️ Gửi thất bại: <b>gửi sang Zalo</b>\n<code>${escapeHtml(errMsg)}</code>`,
